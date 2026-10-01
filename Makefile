@@ -1,4 +1,3 @@
-# Paths must be absolute: the checking server uses /usr/bin/nvcc and /usr/bin/mpic++.
 CC      = /usr/bin/nvcc
 CFLAGS  = -Werror cross-execution-space-call -lm
 
