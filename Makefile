@@ -12,4 +12,15 @@ $(BIN): $(SOURCES)
 clean:
 	rm -f $(BIN)
 
-.PHONY: all clean
+TARGET = $(word 2,$(MAKECMDGOALS))
+
+build:
+	g++ $(TARGET) -o $(basename $(TARGET)).exe
+
+$(TARGET):
+	@rem
+
+run:
+	$(wildcard *.exe)
+
+.PHONY: all clean build run $(TARGET)

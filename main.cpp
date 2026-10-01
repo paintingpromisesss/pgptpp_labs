@@ -1,55 +1,36 @@
-#include <iomanip>
+#include <ios>
 #include <iostream>
-#include <cmath>
+#include <cstdlib>
+#include <iomanip>
 
 int main() {
-	float a, b, c;
-	std::cin >> a >> b >> c;
+	int n;
+	std::cin >> n;
 
-	std::cout << std::fixed << std::setprecision(6);
+	float *arr = (float*)std::malloc(n * sizeof(float));
+	for (int i = 0; i < n; ++i) {
+		std::cin >> arr[i];
+	}
 
-	if (a == 0.0f) {
-		if (b == 0.0f) {
-			if (c == 0.0f) {
-				std::cout << "any" << std::endl;
-			} else {
-				std::cout << "incorrect" << std::endl;
+	for (int i = 0; i < n - 1; ++i) {
+		for (int j = 0; j < n - 1 - i; ++j) {
+			if (arr[j] > arr[j+1]) {
+				float temp = arr[j];
+				arr[j] = arr[j+1];
+				arr[j+1] = temp;
 			}
-		} else {
-			float x = -c / b;
-			if (x == -0.0f) {
-				x = 0.0f;
-			}
-			std::cout << x << std::endl;
-		}
-	} else {
-		float D = b * b - 4.0f * a * c;
-
-		if (D > 0.0f) {
-			float sqrtD = std::sqrt(D);
-			float x1 = (-b + sqrtD) / (2.0f * a);
-			float x2 = (-b - sqrtD) / (2.0f * a);
-
-			if (x1 == -0.0f) {
-				x1 = 0.0f;
-			}
-
-			if (x2 == -0.0f) {
-				x2 = 0.0f;
-			}
-
-			std::cout << x1 << " " << x2 << std::endl;
-		} else if (D == 0.0f) {
-			float x = -b / (2.0f * a);
-			if (x == -0.0f) {
-				x = 0.0f;
-			}
-
-			std::cout << x << std::endl;
-		} else {
-			std::cout << "imaginary" << std::endl;
 		}
 	}
+
+	std::cout << std::scientific << std::setprecision(6);
+	for (int i = 0; i < n; ++i) {
+		if (arr[i] == -0.0f) {
+			arr[i] = 0.0f;
+		}
+		std::cout << arr[i] << (i == n - 1 ? "" : " ");
+	}
+	std::cout << std::endl;
+	std::free(arr);
 
 	return 0;
 }
