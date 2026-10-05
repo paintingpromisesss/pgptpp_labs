@@ -17,10 +17,13 @@ TARGET = $(word 2,$(MAKECMDGOALS))
 build:
 	g++ $(TARGET) -o $(basename $(TARGET)).exe
 
+sign:
+	gpg -ab $(TARGET)
+
 $(TARGET):
 	@rem
 
 run:
 	$(wildcard *.exe)
 
-.PHONY: all clean build run $(TARGET)
+.PHONY: all clean build run sign $(TARGET)
