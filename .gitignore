@@ -11,3 +11,10 @@
 .vscode/
 .idea/
 *.swp
+
+main
+
+*.data
+
+.zed/
+.clangd
