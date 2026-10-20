@@ -15,8 +15,6 @@ do {                                                                        \
     }                                                                       \
 } while (0)
 
-// Normalized Gaussian kernel w[i] = exp(-i^2 / (2 r^2)), built on the host.
-// Separable two-pass scheme: complexity O(w*h*r) instead of O(w*h*r^2).
 
 #define blur_tex(__tex, __i, __j) tex2D<uchar4>((__tex), (__j) + 0.5f, (__i) + 0.5f)
 #define tmp_tex(__tex, __i, __j) tex2D<float4>((__tex), (__j) + 0.5f, (__i) + 0.5f)
@@ -33,7 +31,7 @@ __global__ void gauss_horizontal(cudaTextureObject_t src, float4* dst,
             float3 acc = make_float3(0.0f, 0.0f, 0.0f);
             for (int k = -r; k <= r; ++k) {
                 float f = wts[k + r];
-                uchar4 p = blur_tex(src, i, j + k); // texture clamp extends the image borders
+                uchar4 p = blur_tex(src, i, j + k);
                 acc.x += f * p.x;
                 acc.y += f * p.y;
                 acc.z += f * p.z;
@@ -55,7 +53,7 @@ __global__ void gauss_vertical(cudaTextureObject_t tmp, uchar4* dst,
             float3 acc = make_float3(0.0f, 0.0f, 0.0f);
             for (int k = -r; k <= r; ++k) {
                 float f = wts[k + r];
-                float4 p = tmp_tex(tmp, i + k, j); // texture clamp extends the image borders
+                float4 p = tmp_tex(tmp, i + k, j);
                 acc.x += f * p.x;
                 acc.y += f * p.y;
                 acc.z += f * p.z;
@@ -94,8 +92,6 @@ void write_image(const char* path, int w, int h, uchar4* data) {
     fclose(fp);
 }
 
-// Texture object over a cudaArray with Clamp addressing:
-// border pixels are duplicated beyond the image bounds (ip = max(min(i, h), 1)).
 void make_object_uchar4(uchar4* host, size_t w, size_t h,
                         cudaArray_t& arr, cudaTextureObject_t& tex) {
     cudaChannelFormatDesc desc = cudaCreateChannelDesc<uchar4>();
@@ -143,7 +139,6 @@ int main() {
         std::fprintf(stderr, "ERROR: expected input and output paths\n");
         return 0;
     }
-    // strip newline
     for (char* s : {path_in, path_out}) {
         for (int i = 0; s[i]; ++i) {
             if (s[i] == '\n' || s[i] == '\r') s[i] = '\0';
@@ -153,7 +148,6 @@ int main() {
     int r;
     std::scanf("%d", &r);
 
-    // Grid config for benchmarks (default: 32x32 blocks, 16x16 threads)
     int bx = 32, by = 32, tx = 16, ty = 16;
     if (std::scanf("%d %d", &bx, &by) == 2) {
         std::scanf("%d %d", &tx, &ty);
@@ -163,7 +157,6 @@ int main() {
     uchar4* h_src = nullptr;
     read_image(path_in, w, h, h_src);
 
-    // Gaussian kernel weights
     int k = 2 * r + 1;
     float* h_wts = (float*)std::malloc(sizeof(float) * k);
     double sum = 0.0;
