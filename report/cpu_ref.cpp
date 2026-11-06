@@ -1,45 +1,56 @@
-#include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
-#include <fstream>
 #include <vector>
 
-struct Pixel { uint8_t r, g, b, a; };
+struct Pixel { unsigned char r, g, b, a; };
+struct Mean { uint32_t r, g, b, count; };
 
 int main(int argc, char** argv) {
     if (argc != 3) return 1;
-    std::ifstream in(argv[1], std::ios::binary);
-    int w, h;
-    if (!in.read((char*)&w, 4) || !in.read((char*)&h, 4) || w <= 0 || h <= 0) return 1;
+    FILE* in = std::fopen(argv[1], "rb");
+    if (!in) return 1;
+    int w, h, nc;
+    if (std::fread(&w, 4, 1, in) != 1 || std::fread(&h, 4, 1, in) != 1 || w <= 0 || h <= 0) return 1;
     size_t n = (size_t)w * h;
-    std::vector<Pixel> input(n), output(n);
-    if (!in.read((char*)input.data(), n * sizeof(Pixel))) return 1;
-    std::vector<float> gray(n);
-    timespec t0, t1;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (size_t i = 0; i < n; ++i)
-        gray[i] = 0.299f * input[i].r + 0.587f * input[i].g + 0.114f * input[i].b;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            float p[3][3];
-            for (int dy = -1; dy <= 1; ++dy)
-                for (int dx = -1; dx <= 1; ++dx) {
-                    int iy = std::max(0, std::min(y + dy, h - 1));
-                    int ix = std::max(0, std::min(x + dx, w - 1));
-                    p[dy + 1][dx + 1] = gray[(size_t)iy * w + ix];
-                }
-            float gx = (p[0][2] + 2.0f * p[1][2] + p[2][2]) - (p[0][0] + 2.0f * p[1][0] + p[2][0]);
-            float gy = (p[2][0] + 2.0f * p[2][1] + p[2][2]) - (p[0][0] + 2.0f * p[0][1] + p[0][2]);
-            uint8_t value = static_cast<uint8_t>(std::min(255.0f, std::sqrt(gx * gx + gy * gy)));
-            output[(size_t)y * w + x] = {value, value, value, 0};
+    std::vector<Pixel> pixels(n);
+    if (std::fread(pixels.data(), sizeof(Pixel), n, in) != n) return 1;
+    std::fclose(in);
+    FILE* samples = std::fopen(argv[2], "r");
+    if (!samples || std::fscanf(samples, "%d", &nc) != 1 || nc < 1 || nc > 32) return 1;
+    Mean means[32];
+    for (int j = 0; j < nc; ++j) {
+        int count;
+        if (std::fscanf(samples, "%d", &count) != 1 || count < 1) return 1;
+        uint64_t r = 0, g = 0, b = 0;
+        for (int i = 0; i < count; ++i) {
+            int x, y;
+            if (std::fscanf(samples, "%d%d", &x, &y) != 2 || x < 0 || x >= w || y < 0 || y >= h) return 1;
+            Pixel p = pixels[(size_t)y * w + x]; r += p.r; g += p.g; b += p.b;
         }
+        means[j] = {(uint32_t)r, (uint32_t)g, (uint32_t)b, (uint32_t)count};
     }
-    clock_gettime(CLOCK_MONOTONIC, &t1);
-    std::fprintf(stderr, "cpu_ms = %.3f\n", (t1.tv_sec-t0.tv_sec)*1e3 + (t1.tv_nsec-t0.tv_nsec)/1e6);
-    std::ofstream out(argv[2], std::ios::binary);
-    out.write((char*)&w, 4); out.write((char*)&h, 4);
-    out.write((char*)output.data(), n * sizeof(Pixel));
-    return out ? 0 : 1;
+    std::fclose(samples);
+    timespec start, stop;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (auto& p : pixels) {
+        uint64_t best = 0, best_denominator = 1;
+        int label = 0;
+        for (int j = 0; j < nc; ++j) {
+            Mean c = means[j];
+            int64_t dr = (int64_t)p.r * c.count - c.r;
+            int64_t dg = (int64_t)p.g * c.count - c.g;
+            int64_t db = (int64_t)p.b * c.count - c.b;
+            uint64_t distance = dr*dr + dg*dg + db*db;
+            uint64_t denominator = (uint64_t)c.count * c.count;
+            if (j == 0 || (__uint128_t)distance * best_denominator < (__uint128_t)best * denominator) {
+                best = distance; best_denominator = denominator; label = j;
+            }
+        }
+        p.a = (unsigned char)label;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &stop);
+    std::fprintf(stderr, "cpu_ms = %.6f\n", (stop.tv_sec-start.tv_sec)*1000.0 + (stop.tv_nsec-start.tv_nsec)/1000000.0);
+    return 0;
 }
