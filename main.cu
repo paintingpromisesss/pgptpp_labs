@@ -16,52 +16,30 @@ do {                                                                        \
 } while (0)
 
 
-#define blur_tex(__tex, __i, __j) tex2D<uchar4>((__tex), (__j) + 0.5f, (__i) + 0.5f)
-#define tmp_tex(__tex, __i, __j) tex2D<float4>((__tex), (__j) + 0.5f, (__i) + 0.5f)
-
-__global__ void gauss_horizontal(cudaTextureObject_t src, float4* dst,
-                                 int w, int h, const float* wts, int r) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int idy = blockIdx.y * blockDim.y + threadIdx.y;
-    int offx = blockDim.x * gridDim.x;
-    int offy = blockDim.y * gridDim.y;
-
-    for (int i = idy; i < h; i += offy) {
-        for (int j = idx; j < w; j += offx) {
-            float3 acc = make_float3(0.0f, 0.0f, 0.0f);
-            for (int k = -r; k <= r; ++k) {
-                float f = wts[k + r];
-                uchar4 p = blur_tex(src, i, j + k);
-                acc.x += f * p.x;
-                acc.y += f * p.y;
-                acc.z += f * p.z;
-            }
-            dst[i * w + j] = make_float4(acc.x, acc.y, acc.z, 0.0f);
-        }
-    }
+__device__ float brightness(cudaTextureObject_t tex, int x, int y) {
+    uchar4 p = tex2D<uchar4>(tex, x + 0.5f, y + 0.5f);
+    return 0.299f * p.x + 0.587f * p.y + 0.114f * p.z;
 }
 
-__global__ void gauss_vertical(cudaTextureObject_t tmp, uchar4* dst,
-                               int w, int h, const float* wts, int r) {
+__global__ void sobel(cudaTextureObject_t tex, uchar4* dst, int w, int h) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int idy = blockIdx.y * blockDim.y + threadIdx.y;
     int offx = blockDim.x * gridDim.x;
     int offy = blockDim.y * gridDim.y;
-
-    for (int i = idy; i < h; i += offy) {
-        for (int j = idx; j < w; j += offx) {
-            float3 acc = make_float3(0.0f, 0.0f, 0.0f);
-            for (int k = -r; k <= r; ++k) {
-                float f = wts[k + r];
-                float4 p = tmp_tex(tmp, i + k, j);
-                acc.x += f * p.x;
-                acc.y += f * p.y;
-                acc.z += f * p.z;
-            }
-            dst[i * w + j] = make_uchar4(
-                (unsigned char)fminf(255.5f, fmaxf(0.0f, acc.x)),
-                (unsigned char)fminf(255.5f, fmaxf(0.0f, acc.y)),
-                (unsigned char)fminf(255.5f, fmaxf(0.0f, acc.z)), 0);
+    for (int y = idy; y < h; y += offy) {
+        for (int x = idx; x < w; x += offx) {
+            float p00 = brightness(tex, x - 1, y - 1);
+            float p01 = brightness(tex, x, y - 1);
+            float p02 = brightness(tex, x + 1, y - 1);
+            float p10 = brightness(tex, x - 1, y);
+            float p12 = brightness(tex, x + 1, y);
+            float p20 = brightness(tex, x - 1, y + 1);
+            float p21 = brightness(tex, x, y + 1);
+            float p22 = brightness(tex, x + 1, y + 1);
+            float gx = (p02 + 2.0f * p12 + p22) - (p00 + 2.0f * p10 + p20);
+            float gy = (p20 + 2.0f * p21 + p22) - (p00 + 2.0f * p01 + p02);
+            unsigned char value = (unsigned char)fminf(255.0f, sqrtf(gx * gx + gy * gy));
+            dst[y * w + x] = make_uchar4(value, value, value, 0);
         }
     }
 }
@@ -76,7 +54,7 @@ void read_image(const char* path, int& w, int& h, uchar4*& data) {
         std::fprintf(stderr, "ERROR: broken image file %s\n", path);
         std::exit(0);
     }
-    if (w <= 0 || h <= 0 || w >= 65536 || h >= 65536 || (size_t)w * h > 50000000) {
+    if (w <= 0 || h <= 0 || w >= 65536 || h >= 65536 || (size_t)w * h > 100000000) {
         std::fprintf(stderr, "ERROR: invalid image dimensions\n");
         std::exit(0);
     }
@@ -128,30 +106,9 @@ void make_object_uchar4(uchar4* host, size_t w, size_t h,
     CSC(cudaCreateTextureObject(&tex, &rd, &td, nullptr));
 }
 
-void make_object_float4(float4* devFrom, size_t w, size_t h,
-                        cudaArray_t& arr, cudaTextureObject_t& tex) {
-    cudaChannelFormatDesc desc = cudaCreateChannelDesc<float4>();
-    CSC(cudaMallocArray(&arr, &desc, w, h));
-    CSC(cudaMemcpy2DToArray(arr, 0, 0, devFrom, sizeof(float4) * w,
-                            sizeof(float4) * w, h, cudaMemcpyDeviceToDevice));
-
-    cudaResourceDesc rd = {};
-    rd.resType = cudaResourceTypeArray;
-    rd.res.array.array = arr;
-
-    cudaTextureDesc td = {};
-    td.addressMode[0] = cudaAddressModeClamp;
-    td.addressMode[1] = cudaAddressModeClamp;
-    td.filterMode = cudaFilterModePoint;
-    td.normalizedCoords = false;
-
-    CSC(cudaCreateTextureObject(&tex, &rd, &td, nullptr));
-}
-
 int main(int argc, char** argv) {
-    const int MAX_PATH = 1024;
-    char path_in[MAX_PATH], path_out[MAX_PATH];
-    if (!fgets(path_in, MAX_PATH, stdin) || !fgets(path_out, MAX_PATH, stdin)) {
+    char path_in[1024], path_out[1024];
+    if (!fgets(path_in, sizeof(path_in), stdin) || !fgets(path_out, sizeof(path_out), stdin)) {
         std::fprintf(stderr, "ERROR: expected input and output paths\n");
         return 0;
     }
@@ -160,13 +117,6 @@ int main(int argc, char** argv) {
             if (s[i] == '\n' || s[i] == '\r') s[i] = '\0';
         }
     }
-
-    int r;
-    if (std::scanf("%d", &r) != 1 || r < 0 || r >= 1024) {
-        std::fprintf(stderr, "ERROR: invalid radius\n");
-        return 0;
-    }
-
     int bx = 32, by = 32, tx = 16, ty = 16;
     if (argc != 1) {
         char extra;
@@ -179,91 +129,32 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
-
     int w, h;
-    uchar4* h_src = nullptr;
-    read_image(path_in, w, h, h_src);
-
-    int k = 2 * r + 1;
-    float* h_wts = (float*)std::malloc(sizeof(float) * k);
-    if (!h_wts) {
-        std::fprintf(stderr, "ERROR: cannot allocate weights\n");
-        return 0;
-    }
-    double sum = 0.0;
-    for (int i = 0; i < k; ++i) {
-        double x = i - r;
-        h_wts[i] = r == 0 ? 1.0f : (float)std::exp(-x * x / (2.0 * r * r));
-        sum += h_wts[i];
-    }
-    for (int i = 0; i < k; ++i) h_wts[i] /= (float)sum;
-
-    float* d_wts = nullptr;
-    CSC(cudaMalloc(&d_wts, sizeof(float) * k));
-    CSC(cudaMemcpy(d_wts, h_wts, sizeof(float) * k, cudaMemcpyHostToDevice));
-
-    float4* d_tmp = nullptr;
-    uchar4* d_out = nullptr;
-    CSC(cudaMalloc(&d_tmp, sizeof(float4) * w * h));
-    CSC(cudaMalloc(&d_out, sizeof(uchar4) * w * h));
-
-    cudaArray_t arr_src = nullptr;
-    cudaTextureObject_t tex_src;
-    make_object_uchar4(h_src, w, h, arr_src, tex_src);
-
-    const dim3 block(tx, ty);
-    dim3 grid(bx, by);
-
-    cudaEvent_t start_all, start_k, stop_k, stop_all, stop_horizontal, start_vertical;
-    CSC(cudaEventCreate(&start_all));
-    CSC(cudaEventCreate(&start_k));
-    CSC(cudaEventCreate(&stop_k));
-    CSC(cudaEventCreate(&stop_all));
-    CSC(cudaEventCreate(&stop_horizontal));
-    CSC(cudaEventCreate(&start_vertical));
-    CSC(cudaEventRecord(start_all));
-
-    CSC(cudaEventRecord(start_k));
-    gauss_horizontal<<<grid, block>>>(tex_src, d_tmp, w, h, d_wts, r);
+    uchar4* img = nullptr;
+    read_image(path_in, w, h, img);
+    cudaArray_t arr = nullptr;
+    cudaTextureObject_t tex;
+    make_object_uchar4(img, w, h, arr, tex);
+    uchar4* out = nullptr;
+    CSC(cudaMalloc(&out, sizeof(uchar4) * w * h));
+    cudaEvent_t start, stop;
+    CSC(cudaEventCreate(&start));
+    CSC(cudaEventCreate(&stop));
+    CSC(cudaEventRecord(start));
+    sobel<<<dim3(bx, by), dim3(tx, ty)>>>(tex, out, w, h);
     CSC(cudaGetLastError());
-    CSC(cudaEventRecord(stop_horizontal));
-
-    cudaArray_t arr_tmp = nullptr;
-    cudaTextureObject_t tex_tmp;
-    make_object_float4(d_tmp, w, h, arr_tmp, tex_tmp);
-    CSC(cudaEventRecord(start_vertical));
-    gauss_vertical<<<grid, block>>>(tex_tmp, d_out, w, h, d_wts, r);
-    CSC(cudaGetLastError());
-    CSC(cudaEventRecord(stop_k));
-
-    uchar4* h_out = (uchar4*)std::malloc(sizeof(uchar4) * w * h);
-    if (!h_out) {
-        std::fprintf(stderr, "ERROR: cannot allocate output\n");
-        return 0;
-    }
-    CSC(cudaMemcpy(h_out, d_out, sizeof(uchar4) * w * h, cudaMemcpyDeviceToHost));
-
-    CSC(cudaEventRecord(stop_all));
-    CSC(cudaEventSynchronize(stop_all));
-    float ms_all, ms_k, ms_horizontal, ms_vertical;
-    CSC(cudaEventElapsedTime(&ms_all, start_all, stop_all));
-    CSC(cudaEventElapsedTime(&ms_k, start_k, stop_k));
-    CSC(cudaEventElapsedTime(&ms_horizontal, start_k, stop_horizontal));
-    CSC(cudaEventElapsedTime(&ms_vertical, start_vertical, stop_k));
-    std::fprintf(stderr, "horizontal_ms = %.6f vertical_ms = %.6f kernel_ms = %.6f total_ms = %.6f\n",
-                 ms_horizontal, ms_vertical, ms_k, ms_all);
-
-    write_image(path_out, w, h, h_out);
-
-    CSC(cudaDestroyTextureObject(tex_src));
-    CSC(cudaDestroyTextureObject(tex_tmp));
-    CSC(cudaFreeArray(arr_src));
-    CSC(cudaFreeArray(arr_tmp));
-    CSC(cudaFree(d_wts));
-    CSC(cudaFree(d_tmp));
-    CSC(cudaFree(d_out));
-    std::free(h_src);
-    std::free(h_out);
-    std::free(h_wts);
+    CSC(cudaEventRecord(stop));
+    CSC(cudaEventSynchronize(stop));
+    float ms;
+    CSC(cudaEventElapsedTime(&ms, start, stop));
+    std::fprintf(stderr, "kernel_ms = %.6f\n", ms);
+    CSC(cudaMemcpy(img, out, sizeof(uchar4) * w * h, cudaMemcpyDeviceToHost));
+    write_image(path_out, w, h, img);
+    CSC(cudaEventDestroy(start));
+    CSC(cudaEventDestroy(stop));
+    CSC(cudaDestroyTextureObject(tex));
+    CSC(cudaFreeArray(arr));
+    CSC(cudaFree(out));
+    std::free(img);
     return 0;
 }

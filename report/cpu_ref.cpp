@@ -1,76 +1,45 @@
-#include <cstdio>
-#include <cstdlib>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <ctime>
+#include <fstream>
+#include <vector>
 
-// CPU-референс для бенчмарка: двухпроходное гауссово размытие (те же формулы, что и в main.cu).
-struct F3 { float x, y, z; };
-struct U4 { unsigned char x, y, z, w; };
-using float3 = F3; using uchar4 = U4;
-static float3 make_float3(float a, float b, float c) { return {a, b, c}; }
-static uchar4 make_uchar4(unsigned char a, unsigned char b, unsigned char c, unsigned char d) { return {a, b, c, d}; }
-
-static void blur(int w, int h, const uchar4* src, uchar4* dst, int r) {
-    int k = 2 * r + 1;
-    float* wts = (float*)malloc(sizeof(float) * k);
-    double sum = 0.0;
-    for (int i = 0; i < k; ++i) {
-        double x = i - r;
-        wts[i] = r == 0 ? 1.0f : (float)exp(-x * x / (2.0 * r * r));
-        sum += wts[i];
-    }
-    for (int i = 0; i < k; ++i) wts[i] /= (float)sum;
-
-    auto cl = [](int v, int m) { return v < 0 ? 0 : (v > m ? m : v); };
-    float3* tmp = (float3*)malloc(sizeof(float3) * w * h);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            float a = 0, b = 0, c = 0;
-            for (int k = -r; k <= r; ++k) {
-                float f = wts[k + r];
-                uchar4 p = src[y * w + cl(x + k, w - 1)];
-                a += f * p.x; b += f * p.y; c += f * p.z;
-            }
-            tmp[y * w + x] = make_float3(a, b, c);
-        }
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            float a = 0, b = 0, c = 0;
-            for (int k = -r; k <= r; ++k) {
-                float f = wts[k + r];
-                float3 t = tmp[cl(y + k, h - 1) * w + x];
-                a += f * t.x; b += f * t.y; c += f * t.z;
-            }
-            int s = y * w + x;
-            dst[s] = make_uchar4((unsigned char)fminf(255.5f, fmaxf(0.0f, a)),
-                                 (unsigned char)fminf(255.5f, fmaxf(0.0f, b)),
-                                 (unsigned char)fminf(255.5f, fmaxf(0.0f, c)), 0);
-        }
-    free(wts);
-    free(tmp);
-}
+struct Pixel { uint8_t r, g, b, a; };
 
 int main(int argc, char** argv) {
-    if (argc < 4) { fprintf(stderr, "usage: cpu ref.data out.data r\n"); return 1; }
-    FILE* fp = fopen(argv[1], "rb");
+    if (argc != 3) return 1;
+    std::ifstream in(argv[1], std::ios::binary);
     int w, h;
-    if (fread(&w, 4, 1, fp) < 1 || fread(&h, 4, 1, fp) < 1) return 1;
-    uchar4* src = (uchar4*)malloc(sizeof(uchar4) * w * h);
-    if (fread(src, sizeof(uchar4), (size_t)w * h, fp) < (size_t)w * h) return 1;
-    fclose(fp);
-    int r = atoi(argv[3]);
-    uchar4* dst = (uchar4*)malloc(sizeof(uchar4) * w * h);
-
-    struct timespec t0, t1;
+    if (!in.read((char*)&w, 4) || !in.read((char*)&h, 4) || w <= 0 || h <= 0) return 1;
+    size_t n = (size_t)w * h;
+    std::vector<Pixel> input(n), output(n);
+    if (!in.read((char*)input.data(), n * sizeof(Pixel))) return 1;
+    std::vector<float> gray(n);
+    timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    blur(w, h, src, dst, r);
+    for (size_t i = 0; i < n; ++i)
+        gray[i] = 0.299f * input[i].r + 0.587f * input[i].g + 0.114f * input[i].b;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float p[3][3];
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    int iy = std::max(0, std::min(y + dy, h - 1));
+                    int ix = std::max(0, std::min(x + dx, w - 1));
+                    p[dy + 1][dx + 1] = gray[(size_t)iy * w + ix];
+                }
+            float gx = (p[0][2] + 2.0f * p[1][2] + p[2][2]) - (p[0][0] + 2.0f * p[1][0] + p[2][0]);
+            float gy = (p[2][0] + 2.0f * p[2][1] + p[2][2]) - (p[0][0] + 2.0f * p[0][1] + p[0][2]);
+            uint8_t value = static_cast<uint8_t>(std::min(255.0f, std::sqrt(gx * gx + gy * gy)));
+            output[(size_t)y * w + x] = {value, value, value, 0};
+        }
+    }
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
-    fprintf(stderr, "cpu_ms = %.3f\n", ms);
-
-    FILE* fo = fopen(argv[2], "wb");
-    fwrite(&w, 4, 1, fo); fwrite(&h, 4, 1, fo);
-    fwrite(dst, sizeof(uchar4), (size_t)w * h, fo);
-    fclose(fo);
-    return 0;
+    std::fprintf(stderr, "cpu_ms = %.3f\n", (t1.tv_sec-t0.tv_sec)*1e3 + (t1.tv_nsec-t0.tv_nsec)/1e6);
+    std::ofstream out(argv[2], std::ios::binary);
+    out.write((char*)&w, 4); out.write((char*)&h, 4);
+    out.write((char*)output.data(), n * sizeof(Pixel));
+    return out ? 0 : 1;
 }
