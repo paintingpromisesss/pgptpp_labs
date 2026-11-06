@@ -9,7 +9,7 @@
 do {                                                                        \
     cudaError_t res = call;                                                 \
     if (res != cudaSuccess) {                                               \
-        std::fprintf(stderr, "ERROR in %s:%d. Message: %s\n",                \
+        std::fprintf(stderr, "ERROR: %s:%d: %s\n",                          \
                      __FILE__, __LINE__, cudaGetErrorString(res));          \
         std::exit(0);                                                       \
     }                                                                       \
@@ -76,7 +76,15 @@ void read_image(const char* path, int& w, int& h, uchar4*& data) {
         std::fprintf(stderr, "ERROR: broken image file %s\n", path);
         std::exit(0);
     }
+    if (w <= 0 || h <= 0 || w >= 65536 || h >= 65536 || (size_t)w * h > 50000000) {
+        std::fprintf(stderr, "ERROR: invalid image dimensions\n");
+        std::exit(0);
+    }
     data = (uchar4*)std::malloc(sizeof(uchar4) * w * h);
+    if (!data) {
+        std::fprintf(stderr, "ERROR: cannot allocate image\n");
+        std::exit(0);
+    }
     if (fread(data, sizeof(uchar4), (size_t)w * h, fp) < (size_t)w * h) {
         std::fprintf(stderr, "ERROR: broken image file %s\n", path);
         std::exit(0);
@@ -86,10 +94,18 @@ void read_image(const char* path, int& w, int& h, uchar4*& data) {
 
 void write_image(const char* path, int w, int h, uchar4* data) {
     FILE* fp = fopen(path, "wb");
-    fwrite(&w, sizeof(int), 1, fp);
-    fwrite(&h, sizeof(int), 1, fp);
-    fwrite(data, sizeof(uchar4), (size_t)w * h, fp);
-    fclose(fp);
+    if (!fp) {
+        std::fprintf(stderr, "ERROR: cannot open %s for writing\n", path);
+        std::exit(0);
+    }
+    bool ok = fwrite(&w, sizeof(int), 1, fp) == 1 &&
+              fwrite(&h, sizeof(int), 1, fp) == 1 &&
+              fwrite(data, sizeof(uchar4), (size_t)w * h, fp) == (size_t)w * h;
+    if (fclose(fp) != 0) ok = false;
+    if (!ok) {
+        std::fprintf(stderr, "ERROR: cannot write %s\n", path);
+        std::exit(0);
+    }
 }
 
 void make_object_uchar4(uchar4* host, size_t w, size_t h,
@@ -132,7 +148,7 @@ void make_object_float4(float4* devFrom, size_t w, size_t h,
     CSC(cudaCreateTextureObject(&tex, &rd, &td, nullptr));
 }
 
-int main() {
+int main(int argc, char** argv) {
     const int MAX_PATH = 1024;
     char path_in[MAX_PATH], path_out[MAX_PATH];
     if (!fgets(path_in, MAX_PATH, stdin) || !fgets(path_out, MAX_PATH, stdin)) {
@@ -146,11 +162,22 @@ int main() {
     }
 
     int r;
-    std::scanf("%d", &r);
+    if (std::scanf("%d", &r) != 1 || r < 0 || r >= 1024) {
+        std::fprintf(stderr, "ERROR: invalid radius\n");
+        return 0;
+    }
 
     int bx = 32, by = 32, tx = 16, ty = 16;
-    if (std::scanf("%d %d", &bx, &by) == 2) {
-        std::scanf("%d %d", &tx, &ty);
+    if (argc != 1) {
+        char extra;
+        if (argc != 5 || std::sscanf(argv[1], "%d%c", &bx, &extra) != 1 ||
+            std::sscanf(argv[2], "%d%c", &by, &extra) != 1 ||
+            std::sscanf(argv[3], "%d%c", &tx, &extra) != 1 ||
+            std::sscanf(argv[4], "%d%c", &ty, &extra) != 1 ||
+            bx < 1 || by < 1 || tx < 1 || ty < 1) {
+            std::fprintf(stderr, "ERROR: invalid launch configuration\n");
+            return 0;
+        }
     }
 
     int w, h;
@@ -159,10 +186,14 @@ int main() {
 
     int k = 2 * r + 1;
     float* h_wts = (float*)std::malloc(sizeof(float) * k);
+    if (!h_wts) {
+        std::fprintf(stderr, "ERROR: cannot allocate weights\n");
+        return 0;
+    }
     double sum = 0.0;
     for (int i = 0; i < k; ++i) {
         double x = i - r;
-        h_wts[i] = (float)std::exp(-x * x / (2.0 * r * r));
+        h_wts[i] = r == 0 ? 1.0f : (float)std::exp(-x * x / (2.0 * r * r));
         sum += h_wts[i];
     }
     for (int i = 0; i < k; ++i) h_wts[i] /= (float)sum;
@@ -183,33 +214,44 @@ int main() {
     const dim3 block(tx, ty);
     dim3 grid(bx, by);
 
-    cudaEvent_t start_all, start_k, stop_k, stop_all;
+    cudaEvent_t start_all, start_k, stop_k, stop_all, stop_horizontal, start_vertical;
     CSC(cudaEventCreate(&start_all));
     CSC(cudaEventCreate(&start_k));
     CSC(cudaEventCreate(&stop_k));
     CSC(cudaEventCreate(&stop_all));
+    CSC(cudaEventCreate(&stop_horizontal));
+    CSC(cudaEventCreate(&start_vertical));
     CSC(cudaEventRecord(start_all));
 
     CSC(cudaEventRecord(start_k));
     gauss_horizontal<<<grid, block>>>(tex_src, d_tmp, w, h, d_wts, r);
     CSC(cudaGetLastError());
+    CSC(cudaEventRecord(stop_horizontal));
 
     cudaArray_t arr_tmp = nullptr;
     cudaTextureObject_t tex_tmp;
     make_object_float4(d_tmp, w, h, arr_tmp, tex_tmp);
+    CSC(cudaEventRecord(start_vertical));
     gauss_vertical<<<grid, block>>>(tex_tmp, d_out, w, h, d_wts, r);
     CSC(cudaGetLastError());
     CSC(cudaEventRecord(stop_k));
 
     uchar4* h_out = (uchar4*)std::malloc(sizeof(uchar4) * w * h);
+    if (!h_out) {
+        std::fprintf(stderr, "ERROR: cannot allocate output\n");
+        return 0;
+    }
     CSC(cudaMemcpy(h_out, d_out, sizeof(uchar4) * w * h, cudaMemcpyDeviceToHost));
 
     CSC(cudaEventRecord(stop_all));
     CSC(cudaEventSynchronize(stop_all));
-    float ms_all, ms_k;
+    float ms_all, ms_k, ms_horizontal, ms_vertical;
     CSC(cudaEventElapsedTime(&ms_all, start_all, stop_all));
     CSC(cudaEventElapsedTime(&ms_k, start_k, stop_k));
-    std::fprintf(stderr, "kernel_ms = %.6f total_ms = %.6f\n", ms_k, ms_all);
+    CSC(cudaEventElapsedTime(&ms_horizontal, start_k, stop_horizontal));
+    CSC(cudaEventElapsedTime(&ms_vertical, start_vertical, stop_k));
+    std::fprintf(stderr, "horizontal_ms = %.6f vertical_ms = %.6f kernel_ms = %.6f total_ms = %.6f\n",
+                 ms_horizontal, ms_vertical, ms_k, ms_all);
 
     write_image(path_out, w, h, h_out);
 

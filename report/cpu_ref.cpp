@@ -16,7 +16,7 @@ static void blur(int w, int h, const uchar4* src, uchar4* dst, int r) {
     double sum = 0.0;
     for (int i = 0; i < k; ++i) {
         double x = i - r;
-        wts[i] = (float)exp(-x * x / (2.0 * r * r));
+        wts[i] = r == 0 ? 1.0f : (float)exp(-x * x / (2.0 * r * r));
         sum += wts[i];
     }
     for (int i = 0; i < k; ++i) wts[i] /= (float)sum;
